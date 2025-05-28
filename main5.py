@@ -24,7 +24,9 @@ df_diag["Label"] = df_diag["Diagnosis"].map(diagnosis_map)
 
 print("Diagnosis mapping:", diagnosis_map)
 
-def extract_mfcc(file_path, max_len=100):
+MAX_LEN = 150
+
+def extract_mfcc(file_path, max_len=MAX_LEN):
     y, sr = librosa.load(file_path, sr=None)
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=40)
     if mfcc.shape[1] < max_len:
@@ -34,28 +36,32 @@ def extract_mfcc(file_path, max_len=100):
         mfcc = mfcc[:, :max_len]
     return mfcc
 
-def augment_mfcc(mfcc, noise_level=0.01, gain_db_range=(-6, 6), time_stretch_range=(0.9, 1.1)):
+def augment_mfcc(mfcc, noise_level=0.02, gain_db_range=(-10, 10), time_stretch_range=(0.8, 1.2), target_len=MAX_LEN):
     augmented = mfcc.copy()
     noise = np.random.randn(*augmented.shape) * noise_level
     augmented += noise
+
     gain_db = np.random.uniform(*gain_db_range)
     gain = 10**(gain_db / 20)
     augmented *= gain
+
     stretch_factor = np.random.uniform(*time_stretch_range)
     num_frames = int(augmented.shape[1] * stretch_factor)
-    augmented_stretched = np.zeros((augmented.shape[0], num_frames))
+    stretched = np.zeros((augmented.shape[0], num_frames))
     for i in range(augmented.shape[0]):
-        augmented_stretched[i] = np.interp(
+        stretched[i] = np.interp(
             np.linspace(0, 1, num_frames),
             np.linspace(0, 1, augmented.shape[1]),
             augmented[i]
         )
-    if augmented_stretched.shape[1] < 100:
-        pad_width = 100 - augmented_stretched.shape[1]
-        augmented_final = np.pad(augmented_stretched, ((0, 0), (0, pad_width)), mode='constant')
+
+    if stretched.shape[1] < target_len:
+        pad_width = target_len - stretched.shape[1]
+        final = np.pad(stretched, ((0, 0), (0, pad_width)), mode='constant')
     else:
-        augmented_final = augmented_stretched[:, :100]
-    return augmented_final
+        final = stretched[:, :target_len]
+
+    return final
 
 all_mfccs = []
 all_labels = []
@@ -81,7 +87,7 @@ for mfcc, label in zip(all_mfccs, all_labels):
         label_to_features[label] = []
     label_to_features[label].append(mfcc)
 
-target_count = 70
+target_count = 100
 final_features = []
 final_labels = []
 
@@ -102,10 +108,10 @@ for label, mfcc_list in label_to_features.items():
         final_features.append(mfcc)
         final_labels.append(label)
 
-X = np.array(final_features).astype(np.float32)  # shape (N, 40, 100)
+
+X = np.array(final_features).astype(np.float32)
 y = np.array(final_labels)
 
-# Add channel dimension for CNN: (N, 1, 40, 100)
 X = X[:, np.newaxis, :, :]
 
 test_size = 0.4
@@ -122,24 +128,24 @@ test_dataset = TensorDataset(X_test_tensor, y_test_tensor)
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 test_loader = DataLoader(test_dataset, batch_size=32)
 
-# CNN MODEL
+
 class CNN(nn.Module):
     def __init__(self, num_classes):
         super(CNN, self).__init__()
         self.conv_block = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, padding=1),  # (1, 40, 100) -> (16, 40, 100)
+            nn.Conv2d(1, 16, kernel_size=3, padding=1),
             nn.BatchNorm2d(16),
             nn.ReLU(),
-            nn.MaxPool2d(2),  # (16, 20, 50)
+            nn.MaxPool2d(2),
 
-            nn.Conv2d(16, 32, kernel_size=3, padding=1),  # -> (32, 20, 50)
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(2),  # (32, 10, 25)
+            nn.MaxPool2d(2),
         )
         self.fc = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(32 * 10 * 25, 128),
+            nn.Linear(32 * 10 * 37, 128),
             nn.ReLU(),
             nn.Linear(128, num_classes)
         )
@@ -171,7 +177,7 @@ for epoch in range(20):
     print(f"Epoch {epoch+1}, Loss: {avg_loss:.4f}")
 
 plt.plot(loss_history)
-plt.title("Training loss in time - test data size: "+str(100*test_size)+"%")
+plt.title(f"Training loss - test size {int(test_size * 100)}%")
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.grid(True)
@@ -190,13 +196,14 @@ with torch.no_grad():
 
 acc = accuracy_score(all_true, all_preds)
 cm = confusion_matrix(all_true, all_preds, labels=list(range(len(diagnosis_map))))
+
 plt.figure(figsize=(10, 8))
 sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
             xticklabels=unique_diagnoses,
             yticklabels=unique_diagnoses)
 plt.xlabel("Prediction")
 plt.ylabel("Reality")
-plt.title("Confusion Matrix - test data size: "+str(100*test_size)+"% - Accuracy: "+str(100*round(acc,2))+"%")
+plt.title(f"Confusion Matrix\nTest size: {int(test_size*100)}% | Accuracy: {acc*100:.2f}%")
 plt.show()
 
 torch.save(model.state_dict(), "cnn_model.pth")
